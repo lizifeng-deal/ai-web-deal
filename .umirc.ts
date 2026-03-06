@@ -1,4 +1,5 @@
 import { defineConfig } from '@umijs/max';
+const API_TARGET = process.env.API_TARGET || 'http://127.0.0.1:5000';
 
 export default defineConfig({
   antd: {},
@@ -15,12 +16,12 @@ export default defineConfig({
       redirect: '/home',
     },
     {
-      name: '首页',
+      name: '资金管理',
       path: '/home',
       component: './Home',
     },
     {
-      name: '简单',
+      name: '初步建仓',
       path: '/simple',
       component: './simple',
     },
@@ -36,6 +37,13 @@ export default defineConfig({
     },
   ],
   npmClient: 'npm',
+  proxy: {
+    '/api': {
+      target: API_TARGET,
+      changeOrigin: true,
+      pathRewrite: { '^/api': '' },
+    },
+  },
   // publicPath: './',
   // // 路由配置为 hash 模式（避免 history 模式下直接打开的路径问题）
   // history: {

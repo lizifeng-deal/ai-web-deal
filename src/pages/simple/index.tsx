@@ -4,8 +4,6 @@ import React from 'react';
 import SimpleLongStrategy from './components/simpleLongStrategy';
 import SimpleShortStrategy from './components/simpleShortStrategy';
 
-// 函数组件（使用 Hooks）
-
 const Page: React.FC = () => {
   return (
     <PageContainer ghost>
