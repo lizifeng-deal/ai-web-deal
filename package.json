@@ -4,6 +4,7 @@
   "scripts": {
     "build": "max build",
     "dev": "max dev",
+    "deploy:build": "npm run build && echo 'Build completed! Upload dist/ folder to your server.'",
     "format": "prettier --cache --write .",
     "postinstall": "max setup",
     "prepare": "husky",
