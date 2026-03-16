@@ -32,18 +32,30 @@ interface LedgerEntry {
   currency?: string;
 }
 
-// 持仓结构：用于计算市值、浮动盈亏与保证金占用
-interface Position {
-  id: string;
-  name: string;
-  side: 'long' | 'short';
-  quantity: number;
-  market_value: number;
-  open_price: number;
-  pnl: number;
-  leverage: number;
-  margin: number;
-  currency: string;
+// 合约持仓接口
+interface ContractPosition {
+  /** 开仓均价 */
+  entryPrice: string;
+  /** 标记价格（交易所用于计算盈亏/强平的参考价格） */
+  markPrice: string;
+  /** 未实现盈亏（浮动盈亏，正数盈利/负数亏损） */
+  unRealizedProfit: string;
+  /** 强平价格（爆仓价，价格触及该值会被强制平仓） */
+  liquidationPrice: string;
+  /** 保本价格（盈亏平衡价，覆盖手续费/滑点等成本） */
+  breakEvenPrice: string;
+  /** 杠杆倍数（如"10"表示10倍杠杆） */
+  leverage: string;
+  /** 持仓数量（合约数量，如"0.019"） */
+  positionAmt: string;
+  /** 持仓方向（LONG=做多，SHORT=做空） */
+  positionSide: 'LONG' | 'SHORT';
+  /** 数据更新时间戳（毫秒级） */
+  updateTime: number;
+  // 为了兼容现有功能，保留一些额外字段
+  id?: string;
+  symbol?: string; // 合约名称
+  currency?: string; // 结算货币
 }
 
 const currency = 'CNY';
@@ -54,7 +66,7 @@ const HomePage: React.FC = () => {
   // 冻结资金：如挂单预占或风控冻结
   const [frozenFunds, setFrozenFunds] = useState<number>(0);
   // 示例持仓数据：实际可由后端或策略模块驱动
-  const [positions, setPositions] = useState<Position[]>([]);
+  const [positions, setPositions] = useState<ContractPosition[]>([]);
   // 资金流水：记录类账本
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [addForm] = Form.useForm();
@@ -67,14 +79,18 @@ const HomePage: React.FC = () => {
     getPositions();
   }, []);
 
-  // 持仓市值
+  // 持仓市值（基于标记价格和持仓数量计算）
   const positionMarketValue = useMemo(() => {
-    return positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
+    return positions.reduce((sum, p) => {
+      const markPrice = parseFloat(p.markPrice || '0');
+      const positionAmt = parseFloat(p.positionAmt || '0');
+      return sum + (markPrice * Math.abs(positionAmt));
+    }, 0);
   }, [positions]);
 
   // 浮动盈亏
   const floatingPnL = useMemo(() => {
-    return positions.reduce((sum, p) => sum + (p.pnl || 0), 0);
+    return positions.reduce((sum, p) => sum + parseFloat(p.unRealizedProfit || '0'), 0);
   }, [positions]);
 
   // 已实现盈亏：来源于账本中交割盈亏
@@ -113,15 +129,9 @@ const HomePage: React.FC = () => {
     get<any[]>('/positions').then((data) => {
       setPositions(data);
     });
-    get<any[]>('/binance/positions').then((data) => {
-      console.log(data);
-      
-    });
   };
 
-  const addPosition = (
-    pos: Omit<Position, 'id' | 'market_value' | 'pnl' | 'margin'>,
-  ) => {
+  const addPosition = (pos: Omit<ContractPosition, 'id' | 'updateTime'>) => {
     post('/positions', pos).then((res) => {
       console.log(res);
       getPositions();
@@ -158,9 +168,6 @@ const HomePage: React.FC = () => {
       title: '金额',
       dataIndex: 'amount',
       key: 'amount',
-      render: (v: number, record: LedgerEntry) => {
-        return `${v.toFixed(2)} ${currency}`;
-      },
     },
     {
       title: '时间',
@@ -281,59 +288,98 @@ const HomePage: React.FC = () => {
             </Button>
           </div>
           <Table
-            rowKey="id"
+            rowKey={(record, index) => record.id || `position_${index}`}
             size="small"
             columns={[
-              { title: '名称', dataIndex: 'name', key: 'name' },
+              { 
+                title: '合约名称', 
+                dataIndex: 'symbol', 
+                key: 'symbol',
+                width: 120,
+                fixed: 'left',
+                render: (symbol: string) => symbol || '--'
+              },
               {
-                title: '方向',
-                dataIndex: 'side',
-                key: 'side',
-                render: (v: 'long' | 'short') => (
-                  <Tag color={v === 'long' ? 'green' : 'red'}>
-                    {v === 'long' ? '做多' : '做空'}
+                title: '持仓方向',
+                dataIndex: 'positionSide',
+                key: 'positionSide',
+                width: 90,
+                render: (side: 'LONG' | 'SHORT') => (
+                  <Tag color={side === 'LONG' ? 'green' : 'red'}>
+                    {side === 'LONG' ? '做多' : '做空'}
                   </Tag>
                 ),
               },
-              { title: '数量', dataIndex: 'quantity', key: 'quantity' },
-              {
-                title: '市值',
-                dataIndex: 'market_value',
-                key: 'market_value',
-                render: (v: number, r: PositionEntry) =>
-                  `${v.toFixed(2)} ${r.currency}`,
+              { 
+                title: '持仓数量', 
+                dataIndex: 'positionAmt', 
+                key: 'positionAmt',
+                width: 120,
+                render: (amt: string) => parseFloat(amt || '0').toFixed(6)
               },
               {
-                title: '开仓价',
-                dataIndex: 'open_price',
-                key: 'open_price',
-                render: (v: number, r: PositionEntry) =>
-                  `${v.toFixed(2)} ${r.currency}`,
+                title: '开仓均价',
+                dataIndex: 'entryPrice',
+                key: 'entryPrice',
+                width: 100,
+                render: (price: string) => parseFloat(price || '0').toFixed(2)
               },
               {
-                title: '盈亏',
-                dataIndex: 'pnl',
-                key: 'pnl',
-                render: (v: number, r: PositionEntry) => (
-                  <span style={{ color: v >= 0 ? '#3f8600' : '#cf1322' }}>
-                    {v.toFixed(2)} {r.currency}
-                  </span>
-                ),
+                title: '标记价格',
+                dataIndex: 'markPrice',
+                key: 'markPrice',
+                width: 100,
+                render: (price: string) => parseFloat(price || '0').toFixed(2)
               },
-              { title: '杠杆', dataIndex: 'leverage', key: 'leverage' },
               {
-                title: '保证金',
-                dataIndex: 'margin',
-                key: 'margin',
-                render: (v: number, r: PositionEntry) =>
-                  `${v.toFixed(2)} ${r.currency}`,
+                title: '未实现盈亏',
+                dataIndex: 'unRealizedProfit',
+                key: 'unRealizedProfit',
+                width: 120,
+                render: (pnl: string) => {
+                  const pnlNum = parseFloat(pnl || '0');
+                  return (
+                    <span style={{ color: pnlNum >= 0 ? '#3f8600' : '#cf1322' }}>
+                      {pnlNum.toFixed(2)}
+                    </span>
+                  );
+                }
               },
-              { title: '币种', dataIndex: 'currency', key: 'currency' },
+              { 
+                title: '杠杆倍数', 
+                dataIndex: 'leverage', 
+                key: 'leverage',
+                width: 80,
+                render: (leverage: string) => `${leverage}x`
+              },
+              {
+                title: '强平价格',
+                dataIndex: 'liquidationPrice',
+                key: 'liquidationPrice',
+                width: 100,
+                render: (price: string) => parseFloat(price || '0').toFixed(2)
+              },
+              {
+                title: '保本价格',
+                dataIndex: 'breakEvenPrice',
+                key: 'breakEvenPrice',
+                width: 100,
+                render: (price: string) => parseFloat(price || '0').toFixed(2)
+              },
+              {
+                title: '更新时间',
+                dataIndex: 'updateTime',
+                key: 'updateTime',
+                width: 160,
+                render: (timestamp: number) => new Date(timestamp).toLocaleString()
+              },
               {
                 title: '操作',
                 dataIndex: 'action',
                 key: 'action',
-                render: (_: any, record: PositionEntry) => (
+                width: 80,
+                fixed: 'right',
+                render: (_: any, record: ContractPosition) => (
                   <Popconfirm title="确认删除该仓位？" onConfirm={() => {
                     del(`/positions/${record.id}`).then(() => {
                       getPositions();
@@ -347,6 +393,7 @@ const HomePage: React.FC = () => {
               },
             ]}
             dataSource={positions}
+            scroll={{ x: 1500, y: 400 }}
             pagination={{ pageSize: 10 }}
           />
         </Card>
@@ -418,17 +465,18 @@ const HomePage: React.FC = () => {
           onOk={() => {
             addPosForm.validateFields().then((values) => {
               const payload = {
-                name: values.name,
-                side: values.side,
-                quantity: Number(values.quantity),
-                market_value: Number(values.market_value),
-                open_price: Number(values.open_price),
-                pnl: Number(values.pnl),
-                leverage: Number(values.leverage),
-                margin: Number(values.margin),
-                currency: values.currency || 'USD',
-              } as Omit<PositionEntry, 'id'>;
-              addPosition(payload as any);
+                symbol: values.symbol,
+                entryPrice: values.entryPrice.toString(),
+                markPrice: values.markPrice.toString(),
+                liquidationPrice: values.liquidationPrice.toString(),
+                breakEvenPrice: values.breakEvenPrice.toString(),
+                leverage: values.leverage.toString(),
+                positionAmt: values.positionAmt.toString(),
+                positionSide: values.positionSide,
+                currency: values.currency || 'USDT',
+                updateTime: Date.now(),
+              } as unknown as Omit<ContractPosition, 'id' | 'updateTime'>;
+              addPosition(payload);
             });
           }}
           destroyOnHidden
@@ -436,64 +484,107 @@ const HomePage: React.FC = () => {
           <Form
             form={addPosForm}
             layout="vertical"
-            initialValues={{ side: 'long', currency: 'USD' }}
+            initialValues={{ positionSide: 'LONG', currency: 'USDT' }}
           >
             <Form.Item
-              name="name"
-              label="名称"
-              rules={[{ required: true, message: '请输入名称' }]}
+              name="symbol"
+              label="合约名称"
+              rules={[{ required: true, message: '请输入合约名称' }]}
             >
-              <Input />
+              <Input placeholder="如：BTCUSDT" />
             </Form.Item>
             <Form.Item
-              name="side"
-              label="方向"
-              rules={[{ required: true, message: '请选择方向' }]}
+              name="positionSide"
+              label="持仓方向"
+              rules={[{ required: true, message: '请选择持仓方向' }]}
             >
               <Select
                 options={[
-                  { value: 'long', label: '做多' },
-                  { value: 'short', label: '做空' },
+                  { value: 'LONG', label: '做多 (LONG)' },
+                  { value: 'SHORT', label: '做空 (SHORT)' },
                 ]}
               />
             </Form.Item>
             <Form.Item
-              name="quantity"
-              label="数量"
-              rules={[{ required: true, message: '请输入数量' }]}
+              name="positionAmt"
+              label="持仓数量"
+              rules={[{ required: true, message: '请输入持仓数量' }]}
             >
-              <InputNumber style={{ width: '100%' }} step={1} />
+              <InputNumber 
+                style={{ width: '100%' }} 
+                step={0.001} 
+                precision={6}
+                placeholder="如：0.019"
+              />
             </Form.Item>
             <Form.Item
-              name="market_value"
-              label="市值"
-              rules={[{ required: true, message: '请输入市值' }]}
+              name="entryPrice"
+              label="开仓均价"
+              rules={[{ required: true, message: '请输入开仓均价' }]}
             >
-              <InputNumber style={{ width: '100%' }} step={0.01} />
+              <InputNumber 
+                style={{ width: '100%' }} 
+                step={0.0001} 
+                precision={4}
+                placeholder="开仓时的平均价格"
+              />
             </Form.Item>
             <Form.Item
-              name="open_price"
-              label="开仓价"
-              rules={[{ required: true, message: '请输入开仓价' }]}
+              name="markPrice"
+              label="标记价格"
+              rules={[{ required: true, message: '请输入标记价格' }]}
             >
-              <InputNumber style={{ width: '100%' }} step={0.01} />
+              <InputNumber 
+                style={{ width: '100%' }} 
+                step={0.0001} 
+                precision={4}
+                placeholder="交易所参考价格"
+              />
             </Form.Item>
             <Form.Item
               name="leverage"
-              label="杠杆"
-              rules={[{ required: true, message: '请输入杠杆' }]}
+              label="杠杆倍数"
+              rules={[{ required: true, message: '请输入杠杆倍数' }]}
             >
-              <InputNumber style={{ width: '100%' }} step={1} min={1} />
+              <InputNumber 
+                style={{ width: '100%' }} 
+                step={1} 
+                min={1} 
+                max={125}
+                placeholder="如：10"
+              />
             </Form.Item>
             <Form.Item
-              name="margin"
-              label="保证金"
-              rules={[{ required: true, message: '请输入保证金' }]}
+              name="liquidationPrice"
+              label="强平价格"
+              rules={[{ required: true, message: '请输入强平价格' }]}
             >
-              <InputNumber style={{ width: '100%' }} step={0.01} />
+              <InputNumber 
+                style={{ width: '100%' }} 
+                step={0.01} 
+                precision={2}
+                placeholder="爆仓价格"
+              />
             </Form.Item>
-            <Form.Item name="currency" label="币种">
-              <Input />
+            <Form.Item
+              name="breakEvenPrice"
+              label="保本价格"
+              rules={[{ required: true, message: '请输入保本价格' }]}
+            >
+              <InputNumber 
+                style={{ width: '100%' }} 
+                step={0.01} 
+                precision={2}
+                placeholder="盈亏平衡价"
+              />
+            </Form.Item>
+            <Form.Item name="currency" label="结算货币">
+              <Select
+                options={[
+                  { value: 'USDT', label: 'USDT' },
+                  { value: 'CNY', label: 'CNY' },
+                ]}
+              />
             </Form.Item>
           </Form>
         </Modal>
