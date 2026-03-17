@@ -1,5 +1,6 @@
-import { del, get, post } from '@/utils/request';
+import { del, get, post, put } from '@/utils/request';
 import { PageContainer } from '@ant-design/pro-components';
+import { SyncOutlined } from '@ant-design/icons';
 import {
   Button,
   Card,
@@ -8,16 +9,17 @@ import {
   Form,
   Input,
   InputNumber,
+  message,
   Modal,
   Popconfirm,
   Row,
   Select,
+  Space,
   Statistic,
   Table,
   Tag,
 } from 'antd';
 import React, { useEffect, useMemo, useState } from 'react';
-import styles from './index.less';
 
 // 资金流水类型枚举：入金、出金、手续费、交割盈亏（已实现盈亏）
 type LedgerType = 'deposit' | 'withdraw' | 'fee' | 'delivery_pnl';
@@ -31,6 +33,17 @@ interface LedgerEntry {
   remark?: string;
   currency?: string;
 }
+
+// 根据币种获取货币符号
+const getCurrencySymbol = (currency: string = 'USDT') => {
+  switch (currency.toUpperCase()) {
+    case 'CNY':
+      return '￥';
+    case 'USDT':
+    default:
+      return '$';
+  }
+};
 
 // 合约持仓接口
 interface ContractPosition {
@@ -61,18 +74,18 @@ interface ContractPosition {
 const currency = 'CNY';
 
 const HomePage: React.FC = () => {
-  // 现金余额：受入金/出金/手续费/交割盈亏影响
-  const [cashBalance, setCashBalance] = useState<number>(0);
-  // 冻结资金：如挂单预占或风控冻结
-  const [frozenFunds, setFrozenFunds] = useState<number>(0);
   // 示例持仓数据：实际可由后端或策略模块驱动
   const [positions, setPositions] = useState<ContractPosition[]>([]);
   // 资金流水：记录类账本
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [addForm] = Form.useForm();
   const [addModalOpen, setAddModalOpen] = useState(false);
+  const [editForm] = Form.useForm();
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<LedgerEntry | null>(null);
   const [addPosForm] = Form.useForm();
   const [addPosModalOpen, setAddPosModalOpen] = useState(false);
+  const [syncingBinance, setSyncingBinance] = useState(false);
 
   useEffect(() => {
     getDealLog();
@@ -88,9 +101,22 @@ const HomePage: React.FC = () => {
     }, 0);
   }, [positions]);
 
-  // 浮动盈亏
+  // 浮动盈亏：汇总持仓表里的所有未实现盈亏，统一转换为CNY显示
   const floatingPnL = useMemo(() => {
-    return positions.reduce((sum, p) => sum + parseFloat(p.unRealizedProfit || '0'), 0);
+    return positions.reduce((sum, p) => {
+      const pnl = parseFloat(p.unRealizedProfit || '0');
+      const positionCurrency = p.currency || 'USDT';
+      
+      // 如果已经是CNY，直接相加
+      if (positionCurrency.toUpperCase() === 'CNY') {
+        return sum + pnl;
+      }
+      
+      // 如果是USD类货币，简单按汇率转换（这里可以后续接入实时汇率API）
+      // 假设1 USD = 7.2 CNY（实际项目中应该从API获取实时汇率）
+      const exchangeRate = 7.2;
+      return sum + (pnl * exchangeRate);
+    }, 0);
   }, [positions]);
 
   // 已实现盈亏：来源于账本中交割盈亏
@@ -100,21 +126,17 @@ const HomePage: React.FC = () => {
       .reduce((sum, l) => sum + l.amount, 0);
   }, [ledger]);
 
-  // 可用资金
-  const availableFunds = useMemo(() => {
-    return cashBalance - frozenFunds;
-  }, [cashBalance, frozenFunds]);
-
-  // 总权益：现金余额 + 浮动盈亏 + 已实现盈亏 + 持仓市值
-  const totalEquity = useMemo(() => {
-    return cashBalance + floatingPnL + realizedPnL + positionMarketValue;
-  }, [cashBalance, floatingPnL, realizedPnL, positionMarketValue]);
-
-  // 风险监控相关已移除
 
   // 新增账本记录：规范金额正负，并同步影响现金余额
   const addDealLog = (log: Omit<LedgerEntry, 'id' | 'timestamp'>) => {
     post('/dealLog', log).then((res) => {
+      getDealLog();
+    });
+  };
+
+  // 编辑账本记录
+  const editDealLog = (entryId: string, log: Omit<LedgerEntry, 'id' | 'timestamp'>) => {
+    put(`/dealLog/${entryId}`, log).then((res) => {
       getDealLog();
     });
   };
@@ -131,9 +153,25 @@ const HomePage: React.FC = () => {
     });
   };
 
+  // 同步币安仓位
+  const syncBinancePositions = async () => {
+    setSyncingBinance(true);
+    try {
+      await post('/positions/from-binance', {});
+      // 同步成功后重新获取仓位数据
+      getPositions();
+      message.success('币安仓位同步成功');
+    } catch (error: any) {
+      console.error('同步币安仓位失败:', error);
+      const errorMessage = error?.data?.message || error?.message || '同步币安仓位失败，请检查网络连接或稍后重试';
+      message.error(errorMessage);
+    } finally {
+      setSyncingBinance(false);
+    }
+  };
+
   const addPosition = (pos: Omit<ContractPosition, 'id' | 'updateTime'>) => {
     post('/positions', pos).then((res) => {
-      console.log(res);
       getPositions();
       setAddPosModalOpen(false);
       addPosForm.resetFields();
@@ -168,6 +206,17 @@ const HomePage: React.FC = () => {
       title: '金额',
       dataIndex: 'amount',
       key: 'amount',
+      width: 120,
+      render: (amount: number, record: LedgerEntry) => {
+        const currency = record.currency || 'USDT';
+        const symbol = getCurrencySymbol(currency);
+        
+        return (
+          <span style={{ color: amount >= 0 ? '#3f8600' : '#cf1322' }}>
+            {symbol}{amount.toFixed(2)}
+          </span>
+        );
+      }
     },
     {
       title: '时间',
@@ -185,18 +234,35 @@ const HomePage: React.FC = () => {
       dataIndex: 'action',
       key: 'action',
       render: (_: any, record: LedgerEntry) => (
-        <Popconfirm
-          title="确认删除该流水？"
-          onConfirm={() => {
-            del(`/dealLog/${record.id}`).then((res) => {
-              getDealLog();
-            });
-          }}
-        >
-          <Button type="link" danger>
-            删除
+        <Space>
+          <Button 
+            type="link" 
+            onClick={() => {
+              setEditingRecord(record);
+              editForm.setFieldsValue({
+                type: record.type,
+                amount: record.amount,
+                currency: record.currency || 'USDT',
+                remark: record.remark || ''
+              });
+              setEditModalOpen(true);
+            }}
+          >
+            编辑
           </Button>
-        </Popconfirm>
+          <Popconfirm
+            title="确认删除该流水？"
+            onConfirm={() => {
+              del(`/dealLog/${record.id}`).then((res) => {
+                getDealLog();
+              });
+            }}
+          >
+            <Button type="link" danger>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -208,39 +274,15 @@ const HomePage: React.FC = () => {
         title: '资金管理',
       }}
     >
-      <div className={styles.container}>
+      <div>
         <Card title="资产总览" style={{ marginBottom: 16 }}>
           <Row gutter={[16, 16]}>
-            <Col xs={24} md={8}>
-              <Statistic
-                title="总权益"
-                value={totalEquity}
-                precision={2}
-                suffix={currency}
-              />
-            </Col>
-            <Col xs={24} md={8}>
-              <Statistic
-                title="可用资金"
-                value={availableFunds}
-                precision={2}
-                suffix={currency}
-              />
-            </Col>
-            <Col xs={24} md={8}>
-              <Statistic
-                title="冻结资金"
-                value={frozenFunds}
-                precision={2}
-                suffix={currency}
-              />
-            </Col>
             <Col xs={24} md={8}>
               <Statistic
                 title="持仓市值"
                 value={positionMarketValue}
                 precision={2}
-                suffix={currency}
+                prefix={getCurrencySymbol(currency)}
               />
             </Col>
             <Col xs={24} md={8}>
@@ -248,7 +290,7 @@ const HomePage: React.FC = () => {
                 title="浮动盈亏"
                 value={floatingPnL}
                 precision={2}
-                suffix={currency}
+                prefix={getCurrencySymbol(currency)}
                 valueStyle={{ color: floatingPnL >= 0 ? '#3f8600' : '#cf1322' }}
               />
             </Col>
@@ -257,7 +299,7 @@ const HomePage: React.FC = () => {
                 title="已实现盈亏"
                 value={realizedPnL}
                 precision={2}
-                suffix={currency}
+                prefix={getCurrencySymbol(currency)}
                 valueStyle={{ color: realizedPnL >= 0 ? '#3f8600' : '#cf1322' }}
               />
             </Col>
@@ -283,9 +325,18 @@ const HomePage: React.FC = () => {
           />
           <Divider />
           <div style={{ marginBottom: 8 }}>
-            <Button type="primary" onClick={() => setAddPosModalOpen(true)}>
-              新增仓位
-            </Button>
+            <Space>
+              <Button type="primary" onClick={() => setAddPosModalOpen(true)}>
+                新增仓位
+              </Button>
+              <Button 
+                icon={<SyncOutlined />} 
+                loading={syncingBinance}
+                onClick={syncBinancePositions}
+              >
+                同步币安
+              </Button>
+            </Space>
           </div>
           <Table
             rowKey={(record, index) => record.id || `position_${index}`}
@@ -335,12 +386,15 @@ const HomePage: React.FC = () => {
                 title: '未实现盈亏',
                 dataIndex: 'unRealizedProfit',
                 key: 'unRealizedProfit',
-                width: 120,
-                render: (pnl: string) => {
+                width: 140,
+                render: (pnl: string, record: ContractPosition) => {
                   const pnlNum = parseFloat(pnl || '0');
+                  const currency = record.currency || 'USDT';
+                  const symbol = getCurrencySymbol(currency);
+                  
                   return (
                     <span style={{ color: pnlNum >= 0 ? '#3f8600' : '#cf1322' }}>
-                      {pnlNum.toFixed(2)}
+                      {symbol}{pnlNum.toFixed(2)}
                     </span>
                   );
                 }
@@ -430,6 +484,69 @@ const HomePage: React.FC = () => {
                 options={[
                   { value: 'deposit', label: '入金' },
                   { value: 'withdraw', label: '出金' },
+                  { value: 'delivery_pnl', label: '交割盈亏' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="amount"
+              label="金额"
+              rules={[{ required: true, message: '请输入金额' }]}
+            >
+              <InputNumber style={{ width: '100%' }} step={0.01} />
+            </Form.Item>
+            <Form.Item name="currency" label="币种">
+              <Select
+                options={[
+                  { value: 'USDT', label: 'USDT' },
+                  { value: 'CNY', label: 'CNY' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="remark" label="备注">
+              <Input />
+            </Form.Item>
+          </Form>
+        </Modal>
+
+        <Modal
+          title="编辑资金流水"
+          open={editModalOpen}
+          onCancel={() => {
+            setEditModalOpen(false);
+            setEditingRecord(null);
+            editForm.resetFields();
+          }}
+          onOk={() => {
+            editForm.validateFields().then((values) => {
+              if (!editingRecord?.id) return;
+              
+              const payload = {
+                type: values.type,
+                amount: Number(values.amount),
+                remark: values.remark,
+                currency: values.currency || currency,
+              } as Omit<LedgerEntry, 'id' | 'timestamp'>;
+              
+              editDealLog(editingRecord.id, payload);
+              setEditModalOpen(false);
+              setEditingRecord(null);
+              editForm.resetFields();
+            });
+          }}
+          destroyOnHidden
+        >
+          <Form form={editForm} layout="vertical">
+            <Form.Item
+              name="type"
+              label="类型"
+              rules={[{ required: true, message: '请选择类型' }]}
+            >
+              <Select
+                options={[
+                  { value: 'deposit', label: '入金' },
+                  { value: 'withdraw', label: '出金' },
+                  { value: 'fee', label: '手续费' },
                   { value: 'delivery_pnl', label: '交割盈亏' },
                 ]}
               />

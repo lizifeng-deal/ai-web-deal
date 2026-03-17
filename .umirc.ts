@@ -1,6 +1,6 @@
 import { defineConfig } from '@umijs/max';
-const API_TARGET = process.env.API_TARGET || 'http://127.0.0.1:3000';
-// const API_TARGET = process.env.API_TARGET || 'http://43.99.26.245:80';
+// const API_TARGET = process.env.API_TARGET || 'http://127.0.0.1:3000';
+const API_TARGET = process.env.API_TARGET || 'http://43.99.26.245:80';
 export default defineConfig({
   antd: {},
   access: {},
